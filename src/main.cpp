@@ -18,18 +18,6 @@ struct ScoreEntry {
     int gamesPlayed;
 };
 
-struct Animation {
-    Texture2D texture;
-    int frames;
-    float frameTime;
-    float currentTime;
-    int currentFrame;
-    bool isPlaying;
-    int frameWidth;
-    int frameHeight;
-    float scale;
-};
-
 std::map<std::string, ScoreEntry> loadScoreboard() {
     std::map<std::string, ScoreEntry> scoreboard;
     std::ifstream file("scoreboard.txt");
@@ -59,7 +47,7 @@ void saveScoreboard(const std::map<std::string, ScoreEntry>& scoreboard) {
 
 void resetGame(std::vector<Player>& players, int& currentPlayer, int& targetNumber, 
               std::string& message, std::string& hint, int maxNumber, std::string& currentState,
-              Animation& diceAnimation) {
+              int& lowerBound, int& upperBound) {
     for (auto& player : players) {
         player.tries = 0;
     }
@@ -71,9 +59,8 @@ void resetGame(std::vector<Player>& players, int& currentPlayer, int& targetNumb
     message = "Vez de " + players[currentPlayer].name + ". Adivinhe o número (1-" + std::to_string(maxNumber) + "):";
     hint = "";
     currentState = "game";
-    diceAnimation.isPlaying = true;
-    diceAnimation.currentTime = 0.0f;
-    diceAnimation.currentFrame = 0;
+    lowerBound = 1;
+    upperBound = 6;
 }
 
 int main(void) {
@@ -82,6 +69,10 @@ int main(void) {
 
     InitWindow(screenWidth, screenHeight, "Jogo de Dados");
     SetTargetFPS(60);
+
+    InitAudioDevice();
+    Music bgm = LoadMusicStream("resources/music.mp3");
+    PlayMusicStream(bgm);
 
     std::vector<Player> players;
     int currentPlayer = 0;
@@ -93,12 +84,11 @@ int main(void) {
     std::string currentState = "setup";
     std::string hint = "";
     int maxNumber = 6;
-    int numDice = 1;
     bool showScoreboard = false;
     
     float titleScale = 1.0f;
     float titleScaleDirection = 0.002f;
-    Color titleColor = {41, 128, 185, 255};
+    Color titleColor = {39, 174, 96, 255};
     float messageOpacity = 1.0f;
     float messageOpacityDirection = -0.01f;
 
@@ -107,26 +97,27 @@ int main(void) {
         gameFont = GetFontDefault();
     }
 
-    Animation diceAnimation = {
-        LoadTexture("resources/dice.gif"),
-        6,
-        0.05f,
-        0.0f,
-        0,
-        false,
-        0,
-        0,
-        0.5f
-    };
+    Texture2D diceSheet = LoadTexture("resources/clipart1023082.png");
+    int diceAreaWidth = 600;
+    int diceFaceSize = diceAreaWidth / 6;
+    int diceFaceHeight = diceSheet.height * diceFaceSize / (diceSheet.width / 6);
+    int diceStartX = (screenWidth - diceAreaWidth) / 2;
+    int diceY = 450;
+    int selectedDice[2] = {-1, -1};
+    int numSelected = 0;
+    bool guessMade = false;
+    bool guessCorrect = false;
+    bool showHint = false;
+    std::string lastHint = "";
 
-    if (diceAnimation.texture.id != 0) {
-        diceAnimation.frameWidth = diceAnimation.texture.width;
-        diceAnimation.frameHeight = diceAnimation.texture.height;
-    }
+    int lowerBound = 1;
+    int upperBound = 6;
 
     auto scoreboard = loadScoreboard();
 
     while(!WindowShouldClose()) {
+        UpdateMusicStream(bgm);
+
         titleScale += titleScaleDirection;
         if (titleScale > 1.05f || titleScale < 0.95f) {
             titleScaleDirection *= -1;
@@ -137,17 +128,81 @@ int main(void) {
             messageOpacityDirection *= -1;
         }
 
-        if (currentState == "game" && !diceAnimation.isPlaying) {
-            diceAnimation.isPlaying = true;
-            diceAnimation.currentTime = 0.0f;
-            diceAnimation.currentFrame = 0;
-        }
-
-        if (diceAnimation.isPlaying) {
-            diceAnimation.currentTime += GetFrameTime();
-            if (diceAnimation.currentTime >= diceAnimation.frameTime) {
-                diceAnimation.currentTime = 0.0f;
-                diceAnimation.currentFrame = (diceAnimation.currentFrame + 1) % diceAnimation.frames;
+        if (currentState == "game") {
+            Vector2 mouse = GetMousePosition();
+            for (int i = 0; i < 6; i++) {
+                Rectangle dieRect = {
+                    (float)(diceStartX + i * diceFaceSize),
+                    (float)diceY,
+                    (float)diceFaceSize,
+                    (float)diceFaceHeight
+                };
+                if (CheckCollisionPointRec(mouse, dieRect) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    selectedDice[0] = i;
+                    numSelected = 1;
+                    guessMade = true;
+                }
+            }
+            // Handle guess
+            if (guessMade) {
+                int guess = selectedDice[0] + 1;
+                players[currentPlayer].tries++;
+                if (guess == targetNumber) {
+                    guessCorrect = true;
+                    currentPlayer++;
+                    if (currentPlayer >= players.size()) {
+                        currentState = "end";
+                        auto minTries = std::min_element(players.begin(), players.end(),
+                            [](const Player& a, const Player& b) { return a.tries < b.tries; });
+                        int minTriesValue = minTries->tries;
+                        int winners = std::count_if(players.begin(), players.end(),
+                            [minTriesValue](const Player& p) { return p.tries == minTriesValue; });
+                        if (winners > 1) {
+                            message = "Empate! Múltiplos jogadores com " + std::to_string(minTriesValue) + " tentativas!";
+                        } else {
+                            message = minTries->name + " venceu com " + std::to_string(minTriesValue) + " tentativas!";
+                        }
+                        for (auto& player : players) {
+                            if (scoreboard.find(player.name) == scoreboard.end()) {
+                                scoreboard[player.name] = {player.name, player.tries, 1};
+                                player.bestScore = player.tries;
+                            } else {
+                                scoreboard[player.name].gamesPlayed++;
+                                if (player.tries < scoreboard[player.name].bestScore || scoreboard[player.name].bestScore == 0) {
+                                    scoreboard[player.name].bestScore = player.tries;
+                                    player.bestScore = player.tries;
+                                }
+                            }
+                        }
+                        saveScoreboard(scoreboard);
+                    } else {
+                        std::random_device rd;
+                        std::mt19937 gen(rd());
+                        std::uniform_int_distribution<> dis(1, maxNumber);
+                        targetNumber = dis(gen);
+                        message = "Vez de " + players[currentPlayer].name + ". Adivinhe o número (1-" + std::to_string(maxNumber) + "):";
+                        hint = "";
+                        lowerBound = 1;
+                        upperBound = 6;
+                    }
+                    numSelected = 0;
+                    selectedDice[0] = selectedDice[1] = -1;
+                    guessMade = false;
+                    showHint = false;
+                } else {
+                    guessCorrect = false;
+                    if (guess < targetNumber) {
+                        hint = "Tente um número maior!";
+                        lastHint = "maior";
+                        lowerBound = guess + 1;
+                    } else {
+                        hint = "Tente um número menor!";
+                        lastHint = "menor";
+                        upperBound = guess - 1;
+                    }
+                    showHint = true;
+                    guessMade = false;
+                }
             }
         }
 
@@ -157,21 +212,9 @@ int main(void) {
                 for (int i = 0; i < numPlayers; i++) {
                     players.push_back({"Jogador " + std::to_string(i + 1), 0, 0});
                 }
-                currentState = "difficulty";
-                message = "Escolha a dificuldade (1 ou 2 dados):";
+                currentState = "name_input";
+                message = "Digite o nome para " + players[currentPlayer].name + ":";
                 inputText = "";
-            }
-            else if (currentState == "difficulty") {
-                numDice = std::stoi(inputText);
-                if (numDice == 1 || numDice == 2) {
-                    maxNumber = numDice * 6;
-                    currentState = "name_input";
-                    message = "Digite o nome para " + players[currentPlayer].name + ":";
-                    inputText = "";
-                } else {
-                    message = "Por favor, escolha 1 ou 2 dados:";
-                    inputText = "";
-                }
             }
             else if (currentState == "name_input") {
                 if (!inputText.empty()) {
@@ -189,64 +232,10 @@ int main(void) {
                         targetNumber = dis(gen);
                         message = "Vez de " + players[currentPlayer].name + ". Adivinhe o número (1-" + std::to_string(maxNumber) + "):";
                         hint = "";
-                        diceAnimation.isPlaying = true;
+                        lowerBound = 1;
+                        upperBound = maxNumber;
                     } else {
                         message = "Digite o nome para " + players[currentPlayer].name + ":";
-                    }
-                    inputText = "";
-                }
-            }
-            else if (currentState == "game") {
-                if (!inputText.empty()) {
-                    int guess = std::stoi(inputText);
-                    if (guess >= 1 && guess <= maxNumber) {
-                        players[currentPlayer].tries++;
-                        diceAnimation.isPlaying = false;
-                        
-                        if (guess == targetNumber) {
-                            currentPlayer++;
-                            if (currentPlayer >= players.size()) {
-                                currentState = "end";
-                                auto minTries = std::min_element(players.begin(), players.end(),
-                                    [](const Player& a, const Player& b) { return a.tries < b.tries; });
-                                int minTriesValue = minTries->tries;
-                                int winners = std::count_if(players.begin(), players.end(),
-                                    [minTriesValue](const Player& p) { return p.tries == minTriesValue; });
-                                
-                                if (winners > 1) {
-                                    message = "Empate! Múltiplos jogadores com " + std::to_string(minTriesValue) + " tentativas!";
-                                } else {
-                                    message = minTries->name + " venceu com " + std::to_string(minTriesValue) + " tentativas!";
-                                }
-
-                                for (auto& player : players) {
-                                    if (scoreboard.find(player.name) == scoreboard.end()) {
-                                        scoreboard[player.name] = {player.name, player.tries, 1};
-                                        player.bestScore = player.tries;
-                                    } else {
-                                        scoreboard[player.name].gamesPlayed++;
-                                        if (player.tries < scoreboard[player.name].bestScore || scoreboard[player.name].bestScore == 0) {
-                                            scoreboard[player.name].bestScore = player.tries;
-                                            player.bestScore = player.tries;
-                                        }
-                                    }
-                                }
-                                saveScoreboard(scoreboard);
-                            } else {
-                                std::random_device rd;
-                                std::mt19937 gen(rd());
-                                std::uniform_int_distribution<> dis(1, maxNumber);
-                                targetNumber = dis(gen);
-                                message = "Vez de " + players[currentPlayer].name + ". Adivinhe o número (1-" + std::to_string(maxNumber) + "):";
-                                hint = "";
-                                diceAnimation.isPlaying = true;
-                            }
-                        } else {
-                            hint = guess < targetNumber ? "Tente um número maior!" : "Tente um número menor!";
-                            message = "Errado! Tente novamente (1-" + std::to_string(maxNumber) + "):";
-                        }
-                    } else {
-                        message = "Por favor, digite um número entre 1 e " + std::to_string(maxNumber) + ":";
                     }
                     inputText = "";
                 }
@@ -261,10 +250,6 @@ int main(void) {
         while (key > 0) {
             if (currentState == "game") {
                 if ((key >= 48) && (key <= 57) && inputText.length() < 2) {
-                    inputText += (char)key;
-                }
-            } else if (currentState == "difficulty") {
-                if ((key >= 48) && (key <= 57) && inputText.length() < 1) {
                     inputText += (char)key;
                 }
             } else {
@@ -284,7 +269,7 @@ int main(void) {
         BeginDrawing();
         ClearBackground({240, 240, 240, 255});
         
-        DrawRectangleGradientV(0, 0, screenWidth, 120, {41, 128, 185, 255}, {52, 152, 219, 255});
+        DrawRectangleGradientV(0, 0, screenWidth, 120, {39, 174, 96, 255}, {52, 152, 219, 255});
         
         const char* title = "Jogo de Dados";
         Vector2 titleSize = MeasureTextEx(gameFont, title, 40 * titleScale, 2);
@@ -305,15 +290,16 @@ int main(void) {
                 25, 2, {231, 76, 60, 255});
         }
         
-        int inputBoxWidth = 300;
-        int inputBoxX = (screenWidth - inputBoxWidth) / 2;
-        DrawRectangle(inputBoxX, 220, inputBoxWidth, 50, {230, 230, 230, 255});
-        DrawRectangleLines(inputBoxX, 220, inputBoxWidth, 50, {200, 200, 200, 255});
-        
-        Vector2 inputTextSize = MeasureTextEx(gameFont, inputText.c_str(), 30, 2);
-        DrawTextEx(gameFont, inputText.c_str(), 
-            {inputBoxX + (inputBoxWidth - inputTextSize.x) / 2, 230}, 
-            30, 2, BLACK);
+        if (currentState != "game") {
+            int inputBoxWidth = 300;
+            int inputBoxX = (screenWidth - inputBoxWidth) / 2;
+            DrawRectangle(inputBoxX, 220, inputBoxWidth, 50, {230, 230, 230, 255});
+            DrawRectangleLines(inputBoxX, 220, inputBoxWidth, 50, {200, 200, 200, 255});
+            Vector2 inputTextSize = MeasureTextEx(gameFont, inputText.c_str(), 30, 2);
+            DrawTextEx(gameFont, inputText.c_str(), 
+                {inputBoxX + (inputBoxWidth - inputTextSize.x) / 2, 230}, 
+                30, 2, BLACK);
+        }
         
         if (currentState == "game" || currentState == "end") {
             int playerBoxWidth = 400;
@@ -336,27 +322,6 @@ int main(void) {
                     {playerBoxX + (playerBoxWidth - playerInfoSize.x) / 2, yPos}, 
                     25, 2, playerColor);
             }
-        }
-
-        if (currentState == "game" && diceAnimation.isPlaying && diceAnimation.texture.id != 0) {
-            float scaledWidth = diceAnimation.frameWidth * diceAnimation.scale;
-            float scaledHeight = diceAnimation.frameHeight * diceAnimation.scale;
-            
-            Rectangle sourceRec = {
-                0,
-                0,
-                (float)diceAnimation.frameWidth,
-                (float)diceAnimation.frameHeight
-            };
-            
-            Rectangle destRec = {
-                (screenWidth - scaledWidth) / 2.0f,
-                400.0f,
-                scaledWidth,
-                scaledHeight
-            };
-            
-            DrawTexturePro(diceAnimation.texture, sourceRec, destRec, {0, 0}, 0.0f, WHITE);
         }
 
         if (currentState == "end") {
@@ -386,7 +351,7 @@ int main(void) {
                 25, 2, WHITE);
             
             if (isMouseOverButton && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                resetGame(players, currentPlayer, targetNumber, message, hint, maxNumber, currentState, diceAnimation);
+                resetGame(players, currentPlayer, targetNumber, message, hint, maxNumber, currentState, lowerBound, upperBound);
             }
         }
 
@@ -424,10 +389,38 @@ int main(void) {
                 20, 2, {128, 128, 128, 255});
         }
         
+        // Draw dice selection UI
+        if (currentState == "game") {
+            for (int i = 0; i < 6; i++) {
+                Rectangle dieRect = {
+                    (float)(diceStartX + i * diceFaceSize),
+                    (float)diceY,
+                    (float)diceFaceSize,
+                    (float)diceFaceHeight
+                };
+                Rectangle srcRect = {
+                    (float)(i * (diceSheet.width / 6)),
+                    0.0f,
+                    (float)(diceSheet.width / 6),
+                    (float)diceSheet.height
+                };
+                int dieValue = i + 1;
+                Color dieColor = WHITE;
+                if (numSelected > 0 && i == selectedDice[0]) {
+                    dieColor = guessCorrect ? GREEN : RED;
+                } else if (dieValue < lowerBound || dieValue > upperBound) {
+                    dieColor = GRAY;
+                }
+                DrawTexturePro(diceSheet, srcRect, dieRect, {0, 0}, 0.0f, dieColor);
+            }
+        }
+        
         EndDrawing();
     }
 
-    UnloadTexture(diceAnimation.texture);
+    UnloadMusicStream(bgm);
+    CloseAudioDevice();
+    UnloadTexture(diceSheet);
     CloseWindow();
     return 0;
 }
